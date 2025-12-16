@@ -1,0 +1,32 @@
+name: IHSG Rumor Scanner
+
+on:
+  schedule:
+    # Jalan setiap jam dari jam 09:00 - 16:00 WIB (UTC+7)
+    # Di GitHub Actions menggunakan UTC, jadi WIB - 7 jam.
+    # Jam 02:00 UTC = 09:00 WIB. Jam 09:00 UTC = 16:00 WIB.
+    - cron: '15 9 * * 1-5'  # Jam 09:15 UTC = 16:15 WIB
+  workflow_dispatch: # Supaya bisa di-run manual tombol klik
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Scanner Script
+        env:
+          # Mengambil secrets dari setting repo
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scanner.py
