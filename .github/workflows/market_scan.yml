@@ -29,4 +29,5 @@ jobs:
           # Mengambil secrets dari setting repo
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOAPI_KEY: ${{ secrets.GOAPI_KEY }}
         run: python scanner.py
