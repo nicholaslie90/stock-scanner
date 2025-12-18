@@ -2,175 +2,264 @@ import yfinance as yf
 import requests
 import os
 import pandas as pd
-import numpy as np
+import datetime
+import time
 
 # --- CONFIGURATION ---
 WATCHLIST_FILE = "watchlist.txt"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GOAPI_KEY = os.environ.get("GOAPI_KEY")
 
-# Filter Likuiditas (Agar tidak terjebak di saham 'kuburan')
-MIN_DAILY_VALUE = 1_000_000_000  # Minimal transaksi 1 Miliar per hari
+# Daftar Broker Ritel (Indikasi Distribusi jika mereka Top Buyer)
+RETAIL_BROKERS = ['YP', 'PD', 'KK', 'NI', 'XC', 'CC', 'XL', 'GR', 'SQ']
 
 def get_tickers_from_file():
+    """Load watchlist, default ke saham likuid jika file kosong"""
     if not os.path.exists(WATCHLIST_FILE):
-        return ["BBRI.JK", "BBCA.JK", "BMRI.JK", "BBNI.JK", "TLKM.JK", "ASII.JK", "ADRO.JK", "UNTR.JK"]
+        return ["BBRI", "BBCA", "BMRI", "TLKM", "ASII", "ADRO", "UNTR", "GOTO"]
     
     with open(WATCHLIST_FILE, 'r') as f:
-        codes = [line.strip().upper() for line in f.readlines() if line.strip()]
-    
-    tickers = [f"{code}.JK" if not code.endswith(".JK") else code for code in codes]
-    return tickers
+        # Bersihkan format ticker (hapus .JK, uppercase, trim)
+        codes = [line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]
+    return codes
 
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("Telegram Credentials not set.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
-    requests.post(url, json=payload)
+    
+    # Chunk message agar tidak error jika terlalu panjang
+    max_len = 4000
+    for i in range(0, len(message), max_len):
+        chunk = message[i:i+max_len]
+        payload = {"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML", "disable_web_page_preview": True}
+        requests.post(url, json=payload)
 
-def analyze_smart_money_behavior(df):
+def get_broker_summary(ticker, date_str):
     """
-    Analisa VSA (Volume Spread Analysis) untuk mendeteksi jejak Bandar
-    tanpa data broker summary.
+    Mengambil data Broker Summary dari GoAPI.io
+    Endpoint: /stock/idx/{ticker}/broker_summary
     """
-    # Ambil data terakhir
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+    # URL UPDATE: Menggunakan domain baru goapi.io
+    url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
     
-    # 1. Analisa Trend Jangka Pendek (MA20)
-    ma20 = df['Close'].rolling(window=20).mean().iloc[-1]
-    trend = "UPTREND" if curr['Close'] > ma20 else "DOWNTREND"
-    
-    # 2. Relative Volume (RVOL)
-    # Apakah volume hari ini meledak dibanding rata-rata 20 hari?
-    avg_vol_20 = df['Volume'].iloc[-21:-1].mean() # Exclude hari ini untuk rata-rata
-    rvol = curr['Volume'] / avg_vol_20 if avg_vol_20 > 0 else 0
-    
-    # 3. Price Spread Analysis (Rentang Candle)
-    # Spread = High - Low.
-    spread = curr['High'] - curr['Low']
-    avg_spread = (df['High'] - df['Low']).rolling(window=20).mean().iloc[-1]
-    spread_ratio = spread / avg_spread if avg_spread > 0 else 0
-    
-    # 4. Posisi Close (Buying Pressure)
-    # Dimana posisi close dalam candle? (0 = di Low, 1 = di High)
-    if spread > 0:
-        close_position = (curr['Close'] - curr['Low']) / spread
-    else:
-        close_position = 0.5
-
-    # --- INTEPRETASI BANDARMOLOGY (VSA LOGIC) ---
-    signal = "NEUTRAL"
-    desc = "Menunggu Konfirmasi"
-    
-    # CASE A: ABSORPTION / AKUMULASI
-    # Harga tidak banyak gerak (Spread Kecil), tapi Volume Besar (RVOL Tinggi)
-    # Artinya ada yang menampung semua guyuran jual (Siap-siap terbang)
-    if rvol > 1.5 and spread_ratio < 0.8 and close_position > 0.4:
-        signal = "POTENSI AKUMULASI (ABSORPTION)"
-        desc = "Volume besar tapi harga dijaga stabil. Bandar sedang menampung barang."
-
-    # CASE B: MARKUP / PUMP
-    # Harga naik, Spread Lebar, Volume Besar, Close dekat High
-    elif curr['Close'] > prev['Close'] and rvol > 1.2 and spread_ratio > 1.0 and close_position > 0.7:
-        signal = "STRONG MARKUP (POWER BUY)"
-        desc = "Harga didorong naik dengan volume meyakinkan."
-
-    # CASE C: SUPPLY ENTERING / DISTRIBUSI
-    # Harga naik/turun, Volume Hancur Besar, tapi Close di tengah atau bawah (Ekor Atas Panjang)
-    elif rvol > 1.5 and close_position < 0.4:
-        signal = "DISTRIBUSI / SELLING PRESSURE"
-        desc = "Volume besar tapi harga gagal tutup di atas. Hati-hati guyuran."
-
-    # CASE D: NO DEMAND
-    # Harga turun, Volume kering (Kecil)
-    elif curr['Close'] < prev['Close'] and rvol < 0.7:
-        signal = "KOREKSI WAJAR (NO SUPPLY)"
-        desc = "Harga turun karena tidak ada yang beli, bukan karena buangan bandar."
-
-    # Hitung Support Resistance Dinamis (Pivot)
-    pivot = (curr['High'] + curr['Low'] + curr['Close']) / 3
-    s1 = (2 * pivot) - curr['High']
-    r1 = (2 * pivot) - curr['Low']
-
-    return {
-        "price": int(curr['Close']),
-        "change_pct": ((curr['Close'] - prev['Close']) / prev['Close']) * 100,
-        "vol_val": curr['Volume'] * curr['Close'], # Estimasi Value
-        "rvol": rvol,
-        "signal": signal,
-        "desc": desc,
-        "trend": trend,
-        "support": int(s1),
-        "resistance": int(r1)
+    # Header wajib + User Agent agar lebih aman
+    headers = {
+        "X-API-KEY": GOAPI_KEY, 
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (GitHubActions; PythonScript) v1.0"
     }
-
-def run_screener():
-    tickers = get_tickers_from_file()
-    print(f"Scanning {len(tickers)} stocks...")
+    
+    params = {"date": date_str}
     
     try:
-        # Ambil data agak panjang untuk hitung MA dan Avg Volume
-        data = yf.download(tickers, period="3mo", group_by='ticker', progress=False, threads=True)
-    except Exception as e:
-        print(f"Error: {e}")
-        return []
+        # Sleep sebentar untuk rate limiting (penting untuk free/basic plan)
+        time.sleep(1) 
+        
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        
+        # Cek status code HTTP
+        if response.status_code != 200:
+            print(f"GoAPI Error {ticker}: HTTP {response.status_code}")
+            return None
 
+        data = response.json()
+        
+        # Validasi struktur JSON return dari GoAPI.io
+        if data.get('status') != 'success' or not data.get('data'):
+            return None
+            
+        summary = data['data']
+        
+        # Kadang data kosong jika hari libur atau belum update
+        if not summary.get('top_buyers') or not summary.get('top_sellers'):
+            return None
+
+        return analyze_bandar_flow(summary['top_buyers'], summary['top_sellers'])
+        
+    except Exception as e:
+        print(f"Exception for {ticker}: {e}")
+        return None
+
+def analyze_bandar_flow(buyers, sellers):
+    """Logika Analisa Akumulasi vs Distribusi"""
+    
+    # Ambil Top 3 Buyer & Seller
+    # Filter: Pastikan data buyer/seller ada isinya
+    buyers = buyers[:3] if buyers else []
+    sellers = sellers[:3] if sellers else []
+    
+    if not buyers or not sellers:
+        return None
+
+    top3_buy_vol = sum([float(b['volume']) for b in buyers])
+    top3_sell_vol = sum([float(s['volume']) for s in sellers])
+    
+    top1_buyer_code = buyers[0]['code']
+    top1_seller_code = sellers[0]['code']
+    
+    # Logic Penentuan Status
+    status = "NEUTRAL"
+    strength = 0 # Skala -5 (Distribusi Kuat) s.d +5 (Akumulasi Kuat)
+    
+    # Rasio Dominasi
+    # Jika Top 3 Buyer volume > 1.2x Top 3 Seller volume -> Akumulasi
+    if top3_buy_vol > top3_sell_vol * 1.15:
+        status = "ACCUMULATION"
+        strength = 3
+        # Cek Kualitas Broker (Bandar vs Ritel)
+        if top1_buyer_code not in RETAIL_BROKERS and top1_seller_code in RETAIL_BROKERS:
+            status = "BIG ACCUM (Ritel Jualan)"
+            strength = 5 
+            
+    elif top3_sell_vol > top3_buy_vol * 1.15:
+        status = "DISTRIBUTION"
+        strength = -3
+        if top1_buyer_code in RETAIL_BROKERS:
+            status = "BIG DIST (Ritel Nampung)"
+            strength = -5
+
+    return {
+        "status": status,
+        "strength": strength,
+        "top_buyer": top1_buyer_code,
+        "top_seller": top1_seller_code,
+        "top3_buy_codes": ",".join([b['code'] for b in buyers]),
+        "top3_sell_codes": ",".join([s['code'] for s in sellers]),
+        "buy_avg": int(float(buyers[0]['avg_price']))
+    }
+
+def get_technical_data(ticker):
+    """Ambil data teknikal untuk Support/Resistance via yfinance"""
+    try:
+        # Download data
+        df = yf.download(f"{ticker}.JK", period="5d", progress=False)
+        if len(df) < 2: return None
+        
+        # Handle MultiIndex column issue in recent yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                # Coba akses langsung per level jika format baru
+                curr_close = df['Close'][f"{ticker}.JK"].iloc[-1]
+                prev_close = df['Close'][f"{ticker}.JK"].iloc[-2]
+                curr_high = df['High'][f"{ticker}.JK"].iloc[-1]
+                curr_low = df['Low'][f"{ticker}.JK"].iloc[-1]
+                curr_vol = df['Volume'][f"{ticker}.JK"].iloc[-1]
+            except KeyError:
+                # Fallback flat access
+                curr_close = df['Close'].iloc[-1]
+                prev_close = df['Close'].iloc[-2]
+                curr_high = df['High'].iloc[-1]
+                curr_low = df['Low'].iloc[-1]
+                curr_vol = df['Volume'].iloc[-1]
+        else:
+            curr_close = df['Close'].iloc[-1]
+            prev_close = df['Close'].iloc[-2]
+            curr_high = df['High'].iloc[-1]
+            curr_low = df['Low'].iloc[-1]
+            curr_vol = df['Volume'].iloc[-1]
+
+        # Pivot Calculation
+        P = (curr_high + curr_low + curr_close) / 3
+        S1 = (2 * P) - curr_high
+        R1 = (2 * P) - curr_low
+        
+        change_pct = ((curr_close - prev_close) / prev_close) * 100
+        
+        return {
+            "price": int(curr_close),
+            "change": float(change_pct),
+            "vol": int(curr_vol),
+            "s1": int(S1),
+            "r1": int(R1),
+            "pivot": int(P)
+        }
+    except Exception as e:
+        # print(f"YF Error {ticker}: {e}") # Debug only
+        return None
+
+def main():
+    if not GOAPI_KEY:
+        print("Error: GOAPI_KEY belum diset di GitHub Secrets")
+        return
+
+    tickers = get_tickers_from_file()
+    
+    # Set Tanggal Analisa (Default Hari Ini)
+    today = datetime.date.today()
+    
+    # Jika Weekend (Sabtu/Minggu), mundur ke Jumat terakhir
+    if today.weekday() == 5: # Sabtu
+        today = today - datetime.timedelta(days=1)
+    elif today.weekday() == 6: # Minggu
+        today = today - datetime.timedelta(days=2)
+        
+    date_str = today.strftime("%Y-%m-%d")
+    print(f"--- Mulai Analisa: {date_str} ---")
+    
     results = []
     
-    # Helper untuk akses data multi-index atau single-index
-    if len(tickers) == 1:
-        iterator = [(tickers[0], data)]
-    else:
-        iterator = [(t, data[t]) for t in tickers if t in data.columns.levels[0]]
-
-    for ticker, df in iterator:
-        try:
-            df = df.dropna()
-            if len(df) < 30: continue
-            
-            # Filter Likuiditas Value Harian
-            avg_value = (df['Close'] * df['Volume']).tail(5).mean()
-            if avg_value < MIN_DAILY_VALUE: continue 
-
-            analysis = analyze_smart_money_behavior(df)
-            analysis['code'] = ticker.replace(".JK", "")
-            
-            # Hanya ambil yang ada sinyal menarik (Filter Neutral)
-            if analysis['signal'] != "NEUTRAL":
-                results.append(analysis)
-                
-        except Exception:
-            continue
-
-    # Sorting berdasarkan RVOL tertinggi (Dimana ada gula/volume, disitu ada semut/bandar)
-    return sorted(results, key=lambda x: x['rvol'], reverse=True)[:10]
-
-def format_message(stocks):
-    if not stocks:
-        return "⚠️ Tidak ada sinyal Smart Money yang signifikan hari ini."
-    
-    msg = "🕵️‍♂️ <b>VSA BANDAR DETECTOR (No-API)</b>\n"
-    msg += f"📅 {pd.Timestamp.now().strftime('%d %b %Y')}\n"
-    msg += "<i>Screening anomali volume & spread harga</i>\n\n"
-    
-    for s in stocks:
-        icon = "🟢" if "AKUMULASI" in s['signal'] or "MARKUP" in s['signal'] else "🔴"
+    for ticker in tickers:
+        # 1. Analisa Teknikal (yfinance)
+        tech = get_technical_data(ticker)
+        if not tech: continue
         
-        msg += f"<b>{s['code']}</b> ({s['change_pct']:+.2f}%) {icon}\n"
-        msg += f"Harga: {s['price']}\n"
-        msg += f"📊 <b>Signal: {s['signal']}</b>\n"
-        msg += f"ℹ️ <i>{s['desc']}</i>\n"
-        msg += f"📈 RVOL: {s['rvol']:.1f}x (Rata2 Vol)\n"
-        msg += f"🎯 Plan: Buy dekat {s['support']}, TP {s['resistance']}\n"
-        msg += "------------------------------\n"
+        # Filter Likuiditas Minimal (Value Transaksi > 500 Juta)
+        # Menghindari saham gorengan super kecil
+        if tech['vol'] * tech['price'] < 500_000_000: 
+            continue 
+
+        # 2. Analisa Bandarmology (GoAPI.io)
+        print(f"Fetching GoAPI for {ticker}...")
+        bandar = get_broker_summary(ticker, date_str)
         
-    return msg
+        if bandar:
+            # Gabungkan Data
+            data = {**tech, **bandar, "code": ticker}
+            results.append(data)
+        else:
+            print(f"  -> No data/Failed for {ticker}")
+    
+    # Sorting: Prioritaskan Strength Terbesar (Akumulasi)
+    sorted_stocks = sorted(results, key=lambda x: x['strength'], reverse=True)
+    
+    # Ambil Top 15 (Yang Akumulasi atau Netral Bagus)
+    # Strength >= 0 artinya tidak sedang distribusi parah
+    top_picks = [s for s in sorted_stocks if s['strength'] >= 0][:15]
+
+    if not top_picks:
+        send_telegram_message(f"⚠️ Report {date_str}: Tidak ada sinyal akumulasi signifikan.")
+        return
+
+    # Format Message Telegram
+    msg = f"🦅 <b>BANDARMOLOGY REPORT (GoAPI.io)</b>\n"
+    msg += f"📅 {date_str}\n"
+    msg += "<i>Tracking Smart Money Flow</i>\n"
+    msg += "="*20 + "\n\n"
+    
+    for s in top_picks:
+        icon = "🟢"
+        if s['strength'] == 5: icon = "🔥🚀" # Big Accum
+        elif s['strength'] == 3: icon = "✅" # Normal Accum
+        elif s['strength'] == 0: icon = "⚠️" # Neutral
+        
+        avg_diff = "Murah" if s['price'] < s['buy_avg'] else "Wajar"
+        
+        msg += f"<b>{s['code']}</b> ({s['change']:+.2f}%) {icon}\n"
+        msg += f"├ <b>Status:</b> {s['status']}\n"
+        msg += f"├ <b>Top Buyer:</b> {s['top_buyer']} @ {s['buy_avg']}\n"
+        msg += f"├ <b>Structure:</b> [{s['top3_buy_codes']}] vs [{s['top3_sell_codes']}]\n"
+        msg += f"│\n"
+        msg += f"🎯 <b>PLAN BESOK:</b>\n"
+        msg += f"├ Buy: {s['s1']} - {s['pivot']}\n"
+        msg += f"├ TP: {s['r1']}++\n"
+        msg += f"└ CL: < {int(s['s1']*0.97)}\n"
+        msg += "-"*20 + "\n"
+        
+    send_telegram_message(msg)
+    print("Report Telegram Terkirim!")
 
 if __name__ == "__main__":
-    found_stocks = run_screener()
-    telegram_msg = format_message(found_stocks)
-    send_telegram_message(telegram_msg)
-    print("Done.")
+    main()
