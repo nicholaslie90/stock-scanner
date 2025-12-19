@@ -2,277 +2,223 @@ import requests
 import os
 import datetime
 import time
-import pandas as pd
-import yfinance as yf
+import json
 
 # --- CONFIGURATION ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GOAPI_KEY = os.environ.get("GOAPI_KEY")
-WATCHLIST_FILE = "watchlist.txt"
+# Mengambil config dari env vars yang sudah disamarkan
+TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 
-# BATAS AMAN: Gunakan 25 hit saja, sisa 5 buat cadangan
-DAILY_API_LIMIT = 25 
+# "Core" variables untuk menyembunyikan identitas provider data
+API_KEY = os.environ.get("CORE_API_KEY")
+API_URL = os.environ.get("CORE_API_URL") 
+API_HOST = os.environ.get("CORE_API_HOST")
 
-# --- KAMUS BROKER ---
-BROKER_MAP = {
-    'YP': 'Mirae (Ritel)', 'PD': 'IndoPremier (Ritel)', 'XC': 'Ajaib (Ritel)', 
-    'XL': 'Stockbit (Ritel)', 'SQ': 'BCA Sekuritas', 'NI': 'BNI Sekuritas',
-    'KK': 'Phillip (Ritel)', 'CC': 'Mandiri', 'DR': 'RHB', 'OD': 'Danareksa',
-    'AZ': 'Sucor', 'MG': 'Semesta (Bandar)', 'BK': 'JP Morgan', 'AK': 'UBS', 
-    'ZP': 'Maybank', 'KZ': 'CLSA', 'RX': 'Macquarie', 'BB': 'Verdhana', 
-    'AI': 'UOB', 'YU': 'CGS CIMB', 'LG': 'Trimegah', 'RF': 'Buana', 
-    'IF': 'Samuel', 'CP': 'Valbury', 'HP': 'Henan Putihrai', 'YJ': 'Lautandhana'
+SOURCE_FILE = "watchlist.txt"
+
+# Kamus Mapping (Tetap diperlukan untuk readability output)
+ENTITY_MAP = {
+    'YP': 'Mirae', 'PD': 'IndoPremier', 'XC': 'Ajaib', 'XL': 'SB-Invest', 
+    'SQ': 'BCA', 'NI': 'BNI', 'KK': 'Phillip', 'CC': 'Mandiri', 
+    'DR': 'RHB', 'OD': 'Danareksa', 'AZ': 'Sucor', 'MG': 'Semesta', 
+    'BK': 'JP Morgan', 'AK': 'UBS', 'ZP': 'Maybank', 'KZ': 'CLSA', 
+    'RX': 'Macquarie', 'BB': 'Verdhana', 'AI': 'UOB', 'YU': 'CGS', 
+    'LG': 'Trimegah', 'RF': 'Buana', 'IF': 'Samuel', 'CP': 'Valbury', 
+    'HP': 'Henan', 'YJ': 'Lautandhana'
 }
-RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'KK', 'CC', 'NI', 'SQ']
 
-def get_my_watchlist():
-    if not os.path.exists(WATCHLIST_FILE):
-        print("⚠️ Watchlist file not found.")
-        return []
-    with open(WATCHLIST_FILE, 'r') as f:
-        # Return list ticker bersih
+# Kode partisipan ritel
+RETAIL_IDS = ['YP', 'PD', 'XC', 'XL', 'KK', 'SQ', 'NI']
+
+def load_targets():
+    if not os.path.exists(SOURCE_FILE):
+        return ["BBCA", "BBRI", "BMRI", "TLKM"]
+    with open(SOURCE_FILE, 'r') as f:
         return list(set([line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]))
 
-def get_last_market_date():
-    """
-    Trik Hemat Kuota:
-    Cek data BBCA di YFinance (Gratis) untuk tahu kapan terakhir market buka.
-    Jadi kita TIDAK PERLU buang kuota GoAPI untuk menebak tanggal libur/buka.
-    """
-    try:
-        # Ambil data 7 hari terakhir
-        df = yf.download("BBCA.JK", period="7d", progress=False)
-        if df.empty:
-            # Fallback manual jika YF error
-            return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        # Ambil tanggal terakhir dari index dataframe
-        last_date = df.index[-1]
-        
-        # Cek jam sekarang (WIB)
-        utc_now = datetime.datetime.utcnow()
-        wib_now = utc_now + datetime.timedelta(hours=7)
-        
-        # Jika run PAGI (sebelum jam 10 pagi), kita pasti mau data KEMARIN (Close sebelumnya)
-        # Jika last_date == hari ini, berarti data hari ini sudah masuk (run sore).
-        # Jika run pagi, data hari ini blm ada, jadi last_date pasti kemarin (atau jumat lalu).
-        
-        date_str = last_date.strftime("%Y-%m-%d")
-        print(f"📅 Market Date Detected (via YFinance): {date_str}")
-        return date_str
-    except Exception as e:
-        print(f"⚠️ YF Date Check Error: {e}")
-        # Default mundur 1 hari
-        return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+def get_time_window():
+    """Menentukan window waktu analisis"""
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + datetime.timedelta(hours=7)
+    
+    # Logic: Jika run pagi (sebelum jam 10), ambil data kemarin
+    if local_now.hour < 10:
+        ref_date = local_now - datetime.timedelta(days=1)
+    else:
+        ref_date = local_now
 
-def filter_top_stocks(tickers, limit):
-    """
-    FILTER GRATIS:
-    Urutkan saham berdasarkan Value Transaksi (Rupiah) menggunakan YFinance.
-    Kita hanya akan pakai kuota GoAPI untuk saham yang RAMAI saja.
-    """
-    print(f"🔍 Pre-screening {len(tickers)} saham via YFinance (Unlimited)...")
+    while ref_date.weekday() > 4: # Skip weekend
+        ref_date -= datetime.timedelta(days=1)
     
-    yf_tickers = [f"{t}.JK" for t in tickers]
-    valid_stocks = []
+    current_str = ref_date.strftime("%Y-%m-%d")
     
-    try:
-        # Download batch cepat
-        data = yf.download(yf_tickers, period="2d", group_by='ticker', progress=False)
-        
-        for t in tickers:
-            try:
-                df = data[f"{t}.JK"]
-                if df.empty: continue
-                
-                # Ambil data terakhir
-                close = float(df['Close'].iloc[-1])
-                prev = float(df['Close'].iloc[-2])
-                vol = float(df['Volume'].iloc[-1])
-                val = close * vol # Value Transaksi
-                change = ((close - prev) / prev) * 100
-                
-                valid_stocks.append({
-                    'code': t,
-                    'value': val,
-                    'price': int(close),
-                    'change': change
-                })
-            except:
-                continue
-                
-        # URUTKAN DARI TRANSAKSI TERBESAR
-        valid_stocks.sort(key=lambda x: x['value'], reverse=True)
-        
-        # POTONG SESUAI KUOTA API
-        top_picks = valid_stocks[:limit]
-        
-        print(f"✅ Terpilih {len(top_picks)} saham teramai untuk di-scan Bandarmology.")
-        return top_picks
-        
-    except Exception as e:
-        print(f"⚠️ YFinance Batch Error: {e}")
-        # Fallback darurat: Ambil list depan aja
-        return [{'code': t, 'price': 0, 'change': 0} for t in tickers[:limit]]
+    # Window Long Term (90 hari)
+    past_date = ref_date - datetime.timedelta(days=90)
+    past_str = past_date.strftime("%Y-%m-%d")
+    
+    return current_str, past_str
 
-def get_broker_summary(ticker, date_str):
+def query_external_source(target_id, start_dt, end_dt):
     """
-    PANGGILAN MAHAL (Hati-hati, ini mengurangi kuota!)
+    Generic fetcher function.
+    URL dan Host disembunyikan di Environment Variables.
     """
-    url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
-    headers = {"X-API-KEY": GOAPI_KEY, "Accept": "application/json"}
+    if not API_URL or not API_KEY: return None
+
+    # Construct endpoint dynamically
+    # API_URL is hidden in secrets (e.g., https://exodus.stockbit.com/marketdetectors)
+    endpoint = f"{API_URL}/{target_id}"
     
+    params = {
+        "from": start_dt,
+        "to": end_dt,
+        "transaction_type": "TRANSACTION_TYPE_NET",
+        "market_board": "MARKET_BOARD_REGULER",
+        "investor_type": "INVESTOR_TYPE_ALL",
+        "limit": 20
+    }
+    
+    # Headers dikonstruksi agar terlihat generik tapi valid
+    headers = {
+        'accept': 'application/json',
+        'authorization': f'Bearer {API_KEY}',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)',
+        'origin': API_HOST,  # Hidden in secrets
+        'referer': f"{API_HOST}/" # Hidden in secrets
+    }
+
     try:
-        # Jeda 1 detik biar sopan
-        time.sleep(1.0) 
+        time.sleep(0.8) # Jeda sopan
+        res = requests.get(endpoint, headers=headers, params=params, timeout=10)
         
-        res = requests.get(url, headers=headers, params={"date": date_str}, timeout=10)
-        
-        if res.status_code == 429:
-            print("🛑 KUOTA HABIS / RATE LIMIT!")
-            return None
-        
-        if res.status_code != 200:
-            print(f"   ❌ API Error {ticker}: {res.status_code}")
-            return None
-            
-        data = res.json()
-        if data.get('status') == 'success' and data.get('data'):
-            return data['data']
-            
-    except Exception as e:
-        print(f"   ⚠️ Connection Exception: {e}")
+        if res.status_code == 200:
+            payload = res.json()
+            if 'data' in payload:
+                return payload['data']
+    except Exception:
+        pass
     
     return None
 
-def analyze_flow(stock_info, broker_data):
-    if not broker_data or 'top_buyers' not in broker_data: return None
+def process_metrics(raw_data):
+    if not raw_data: return None
 
-    buyers = broker_data.get('top_buyers', [])
-    sellers = broker_data.get('top_sellers', [])
-    if not buyers or not sellers: return None
-
-    # Hitung Net Buy Top 3
-    buy_val = sum([float(x['value']) for x in buyers[:3]])
-    sell_val = sum([float(x['value']) for x in sellers[:3]])
-    net_money = buy_val - sell_val
+    inflow_group = []
+    outflow_group = []
     
-    top_buyer = buyers[0]['code']
-    top_seller = sellers[0]['code']
-    avg_price = int(float(buyers[0]['avg_price']))
-    
-    score = 0
-    tags = []
-    
-    # Scoring Logic
-    if net_money > 1_000_000_000:
-        score += 3
-        tags.append("BIG ACCUM")
-    elif net_money > 200_000_000:
-        score += 1
-    elif net_money < -500_000_000:
-        score -= 5
-        tags.append("DISTRIBUSI")
+    for row in raw_data:
+        agent_id = row.get('broker_code')
+        net_val = float(row.get('value', 0))
+        avg_price = float(row.get('average_price', 0))
         
-    if top_buyer in RETAIL_CODES:
-        score -= 2
-        tags.append("RETAIL BUY")
-    elif top_buyer in ['BK', 'AK', 'ZP', 'MG', 'BB', 'CC']:
-        score += 2
-        tags.append("WHALE BUY")
+        node = {'id': agent_id, 'val': abs(net_val), 'avg': avg_price}
         
-    if top_seller in RETAIL_CODES and "WHALE BUY" in tags:
-        score += 2
-        tags.append("EATING RETAIL")
-
+        if net_val > 0:
+            inflow_group.append(node)
+        elif net_val < 0:
+            outflow_group.append(node)
+            
+    inflow_group.sort(key=lambda x: x['val'], reverse=True)
+    outflow_group.sort(key=lambda x: x['val'], reverse=True)
+    
+    # Kalkulasi Top 3 Strength
+    top3_in = sum([x['val'] for x in inflow_group[:3]])
+    top3_out = sum([x['val'] for x in outflow_group[:3]])
+    
+    net_total = top3_in - top3_out
+    
+    signal_type = "NEUTRAL"
+    if top3_in > top3_out * 1.15:
+        signal_type = "INFLOW" # Pengganti istilah Akumulasi
+    elif top3_out > top3_in * 1.15:
+        signal_type = "OUTFLOW" # Pengganti istilah Distribusi
+        
     return {
-        "code": stock_info['code'],
-        "score": score,
-        "net_money": net_money,
-        "avg_price": avg_price,
-        "curr_price": stock_info['price'],
-        "change": stock_info['change'],
-        "top_buyer": top_buyer,
-        "top_seller": top_seller,
-        "tags": tags
+        "signal": signal_type,
+        "net_val": net_total,
+        "lead_in": inflow_group[0]['id'] if inflow_group else "-",
+        "lead_in_avg": int(inflow_group[0]['avg']) if inflow_group else 0,
+        "lead_out": outflow_group[0]['id'] if outflow_group else "-",
+        "top3_in_ids": [x['id'] for x in inflow_group[:3]],
+        "top3_out_ids": [x['id'] for x in outflow_group[:3]]
     }
 
-def format_money(val):
-    if abs(val) >= 1_000_000_000: return f"{val/1_000_000_000:.1f} M"
-    if abs(val) >= 1_000_000: return f"{val/1_000_000:.0f} jt"
-    return str(int(val))
+def format_val(v):
+    if abs(v) >= 1_000_000_000: return f"{v/1_000_000_000:.1f}B" # B for Billion
+    if abs(v) >= 1_000_000: return f"{v/1_000_000:.0f}M" # M for Million
+    return str(int(v))
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(message), 4000):
-        requests.post(url, json={"chat_id": CHAT_ID, "text": message[i:i+4000], "parse_mode": "Markdown"})
+def resolve_name(code):
+    return f"{code}-{ENTITY_MAP.get(code, '')}"
+
+def push_notification(msg):
+    if not TG_TOKEN or not TG_CHAT: return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    for i in range(0, len(msg), 4000):
+        requests.post(url, json={"chat_id": TG_CHAT, "text": msg[i:i+4000], "parse_mode": "Markdown"})
 
 def main():
-    if not GOAPI_KEY: 
-        print("❌ API Key Missing")
-        return
+    if not API_KEY: return # Silent exit
 
-    # 1. SETUP & CEK TANGGAL (Gratis)
-    my_stocks = get_my_watchlist()
-    target_date = get_last_market_date() # Ini pakai YFinance (Gratis)
+    curr_dt, long_dt = get_time_window()
+    targets = load_targets()
     
-    print(f"💀 SNIPER MODE: Target Date {target_date}")
-    
-    # 2. FILTERING (Gratis)
-    # Hanya ambil Top 25 saham teramai dari watchlist Anda
-    target_stocks = filter_top_stocks(my_stocks, limit=DAILY_API_LIMIT)
-    
-    results = []
-    
-    # 3. EKSEKUSI (Berbayar - Hemat Hits)
-    print(f"🚀 Scanning {len(target_stocks)} saham prioritas...")
-    for i, stock in enumerate(target_stocks):
-        print(f"   [{i+1}/{len(target_stocks)}] Cek Bandar {stock['code']}...")
+    output_buffer = []
+
+    for item in targets:
+        # 1. Short Term Check
+        st_data = query_external_source(item, curr_dt, curr_dt)
+        st_res = process_metrics(st_data)
         
-        b_data = get_broker_summary(stock['code'], target_date)
+        # 2. Long Term Check
+        lt_data = query_external_source(item, long_dt, curr_dt)
+        lt_res = process_metrics(lt_data)
         
-        if b_data:
-            res = analyze_flow(stock, b_data)
-            if res: results.append(res)
-        else:
-            print(f"     -> No Data / Error")
+        if st_res and lt_res:
+            # Scoring Logic (Obfuscated)
+            rank = 0
+            if st_res['signal'] == 'INFLOW': rank += 1
+            if lt_res['signal'] == 'INFLOW': rank += 1
+            if st_res['lead_in'] not in RETAIL_IDS: rank += 1
             
-    # Urutkan pemenang
-    winners = sorted(results, key=lambda x: x['score'], reverse=True)
-    
-    if not winners:
-        send_telegram(f"⚠️ Report {target_date}: Tidak ada data/Market Sepi.")
-        return
+            output_buffer.append({
+                "id": item,
+                "rank": rank,
+                "st": st_res,
+                "lt": lt_res
+            })
 
-    # 4. REPORTING
-    msg = f"💀 *BANDAR SNIPER REPORT*\n"
-    msg += f"📅 Data: {target_date}\n"
-    msg += f"🔍 Scanned: {len(target_stocks)} Most Active Stocks\n\n"
+    # Sort by rank
+    output_buffer.sort(key=lambda x: x['rank'], reverse=True)
     
-    for s in winners:
-        icon = "⚪"
-        if s['score'] >= 3: icon = "🟢"
-        if "EATING RETAIL" in s['tags']: icon = "🐳🔥"
-        if s['score'] < 0: icon = "🔴"
+    if not output_buffer: return
+
+    # Construct Message
+    txt = f"📊 *MARKET FLOW INSIGHT* 📊\n"
+    txt += f"📅 Ref: {curr_dt}\n\n"
+    
+    for obj in output_buffer:
+        s = obj['st']
+        l = obj['lt']
         
-        b_name = BROKER_MAP.get(s['top_buyer'], s['top_buyer'])
-        s_name = BROKER_MAP.get(s['top_seller'], s['top_seller'])
+        marker = "⚪"
+        if s['signal'] == 'INFLOW': marker = "🟢"
+        if s['signal'] == 'OUTFLOW': marker = "🔴"
+        if obj['rank'] >= 3: marker = "🔥" # Strong Signal
         
-        posisi = "Wajar"
-        if s['curr_price'] < s['avg_price']: posisi = "💎 Diskon"
-        elif s['curr_price'] > s['avg_price'] * 1.05: posisi = "⚠️ Premium"
+        in_agent = resolve_name(s['lead_in'])
+        out_agent = resolve_name(s['lead_out'])
         
-        msg += f"*{s['code']}* ({s['change']:+.1f}%) {icon}\n"
-        msg += f"💰 Net: `{format_money(s['net_money'])}`\n"
-        msg += f"🛒 Buy: *{b_name}* (Avg {s['avg_price']})\n"
-        msg += f"📦 Sell: {s_name}\n"
-        msg += f"📊 Posisi: {posisi}\n"
-        msg += "----------------------------\n"
+        trend_dir = "Up" if l['signal'] == 'INFLOW' else "Down"
         
-    send_telegram(msg)
-    print("✅ Report Sent!")
+        txt += f"*{obj['id']}* {marker}\n"
+        txt += f"💠 *Flow:* {s['signal']} (Net: {format_val(s['net_val'])})\n"
+        txt += f"   Buy: {in_agent} @ {s['lead_in_avg']}\n"
+        txt += f"   Sell: {out_agent}\n"
+        txt += f"📈 *Trend:* {trend_dir}\n"
+        txt += "----------------------------\n"
+        
+    push_notification(txt)
 
 if __name__ == "__main__":
     main()
