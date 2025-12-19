@@ -24,6 +24,11 @@ jobs:
         run: |
           pip install yfinance requests pandas
 
+      - name: Debug Connection
+        env:
+          GOAPI_KEY: ${{ secrets.GOAPI_KEY }}
+        run: python debug_api.py
+
       - name: Run Scanner Script
         env:
           # Mengambil secrets dari setting repo
