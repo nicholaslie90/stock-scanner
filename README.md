@@ -1,2 +1,2 @@
-# stock-scanner
-Personal IHSG stock scanner
+# stck-scanner
+Personal project
