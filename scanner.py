@@ -25,60 +25,74 @@ RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'KK', 'CC', 'NI', 'SQ']
 
 def get_my_watchlist():
     if not os.path.exists(WATCHLIST_FILE):
+        print("⚠️ Watchlist file not found, using default.")
         return ["BBCA", "BBRI", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM"]
     with open(WATCHLIST_FILE, 'r') as f:
         return list(set([line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]))
 
 def get_initial_target_date():
-    """Menentukan titik awal pencarian data"""
     utc_now = datetime.datetime.utcnow()
     wib_now = utc_now + datetime.timedelta(hours=7)
     
-    # Jika Pagi (< 12:00), mulai cari dari Kemarin
     if wib_now.hour < 12:
         start_date = wib_now - datetime.timedelta(days=1)
     else:
-        # Jika Sore (> 12:00), mulai cari dari Hari Ini
         start_date = wib_now
-        
     return start_date
 
 def fetch_data_with_fallback(ticker, start_date):
     """
-    Mencoba ambil data pada start_date.
-    Jika KOSONG, otomatis mundur 1 hari, terus menerus sampai max 7 hari ke belakang.
-    Return: (data_json, tanggal_data_ditemukan)
+    Mengambil data dengan Debugging Print yang lengkap
     """
     current_check_date = start_date
-    max_retries = 7 # Cek sampai seminggu ke belakang
+    # Kurangi retry jadi 3 hari saja dulu biar ga abis kuota/kena limit
+    max_retries = 3 
     
     url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
     headers = {"X-API-KEY": GOAPI_KEY, "Accept": "application/json"}
     
     for i in range(max_retries):
-        # Skip Weekend (Sabtu/Minggu) biar hemat request API
         while current_check_date.weekday() > 4:
             current_check_date -= datetime.timedelta(days=1)
             
         date_str = current_check_date.strftime("%Y-%m-%d")
         
         try:
-            # Request API
-            res = requests.get(url, headers=headers, params={"date": date_str}, timeout=5)
+            # DEBUG: Print URL yang ditembak (biar tau script jalan)
+            # print(f"   🔎 Checking {ticker} on {date_str}...") 
+            
+            # PENTING: Jeda diperlama jadi 1.5 detik per request
+            # GoAPI Free Tier sangat sensitif.
+            time.sleep(1.5) 
+            
+            res = requests.get(url, headers=headers, params={"date": date_str}, timeout=10)
+            
+            # DIAGNOSA ERROR
+            if res.status_code != 200:
+                print(f"   ❌ API Error {res.status_code} for {ticker}: {res.text}")
+                # Jika errornya 429 (Too Many Requests), berhenti maksa
+                if res.status_code == 429:
+                    print("   ⚠️ RATE LIMIT HIT! Istirahat 5 detik...")
+                    time.sleep(5)
+                # Lanjut ke tanggal berikutnya (loop continue)
+                current_check_date -= datetime.timedelta(days=1)
+                continue
+
             data = res.json()
             
-            # Cek apakah data valid
             if data.get('status') == 'success' and data.get('data'):
                 d = data['data']
                 if 'top_buyers' in d and d['top_buyers']:
-                    # KETEMU! Kembalikan data dan tanggalnya
                     return d, date_str
-        except:
-            pass
+            else:
+                # API 200 OK tapi data kosong/message error dari API
+                # print(f"   ⚠️ Data Empty for {ticker}: {data}") # Uncomment kalo mau liat detail
+                pass
+                
+        except Exception as e:
+            print(f"   🔥 Exception Connection: {e}")
         
-        # Jika gagal/kosong, mundur 1 hari
         current_check_date -= datetime.timedelta(days=1)
-        time.sleep(0.1) # Delay dikit
         
     return None, None
 
@@ -89,7 +103,6 @@ def analyze_flow(ticker, data, found_date):
     sellers = data.get('top_sellers', [])
     if not buyers or not sellers: return None
 
-    # Bandarmology Calc
     buy_val = sum([float(x['value']) for x in buyers[:3]])
     sell_val = sum([float(x['value']) for x in sellers[:3]])
     net_money = buy_val - sell_val
@@ -101,7 +114,6 @@ def analyze_flow(ticker, data, found_date):
     score = 0
     tags = []
     
-    # Scoring
     if net_money > 1_000_000_000:
         score += 3
         tags.append("BIG ACCUM")
@@ -122,20 +134,36 @@ def analyze_flow(ticker, data, found_date):
         score += 2
         tags.append("EATING RETAIL")
 
-    # Ambil Harga Terakhir (YFinance) untuk perbandingan
     curr_price = avg_price
     change = 0
     try:
+        # PENTING: YFinance juga butuh jeda biar ga diblok
+        time.sleep(0.5) 
         df = yf.download(f"{ticker}.JK", period="2d", progress=False)
         if not df.empty:
-            curr_price = int(df['Close'].iloc[-1])
-            prev = df['Close'].iloc[-2]
+            # Handle MultiIndex column (YFinance update terbaru)
+            if isinstance(df.columns, pd.MultiIndex):
+                # Ambil kolom Close untuk ticker tersebut
+                # Struktur biasanya ('Close', 'BBCA.JK')
+                close_col = df['Close']
+                if isinstance(close_col, pd.DataFrame):
+                    curr_price = int(close_col.iloc[-1].iloc[0])
+                    prev = close_col.iloc[-2].iloc[0]
+                else:
+                    curr_price = int(close_col.iloc[-1])
+                    prev = close_col.iloc[-2]
+            else:
+                curr_price = int(df['Close'].iloc[-1])
+                prev = df['Close'].iloc[-2]
+                
             change = ((curr_price - prev) / prev) * 100
-    except: pass
+    except Exception as e: 
+        # print(f"YF Error: {e}") 
+        pass
 
     return {
         "code": ticker,
-        "date": found_date, # Penting: Tanggal data ditemukan
+        "date": found_date, 
         "score": score,
         "net_money": net_money,
         "avg_price": avg_price,
@@ -158,37 +186,44 @@ def send_telegram(message):
         requests.post(url, json={"chat_id": CHAT_ID, "text": message[i:i+4000], "parse_mode": "Markdown"})
 
 def main():
-    if not GOAPI_KEY: return
+    if not GOAPI_KEY: 
+        print("❌ CRITICAL: GOAPI_KEY is missing from env!")
+        return
+    else:
+        # Print 4 huruf awal key untuk memastikan key terbaca benar
+        print(f"🔑 API Key Detected: {GOAPI_KEY[:4]}****")
 
     my_stocks = get_my_watchlist()
     start_date_obj = get_initial_target_date()
     
-    print(f"💀 BANDAR WATCHLIST RUNNING... Start Check: {start_date_obj.strftime('%Y-%m-%d')}")
+    print(f"💀 BANDAR WATCHLIST DEBUG MODE")
+    print(f"📅 Start Checking from: {start_date_obj.strftime('%Y-%m-%d')}")
+    print(f"📋 Total Stocks: {len(my_stocks)}")
     
     results = []
     
     for i, ticker in enumerate(my_stocks):
-        if i % 5 == 0: print(f"Scanning {ticker}...")
+        # Progress Log
+        print(f"[{i+1}/{len(my_stocks)}] Scanning {ticker}...")
         
-        # PANGGIL DATA DENGAN FALLBACK
-        # Fungsi ini akan otomatis mundur tanggalnya kalau kosong
         data, found_date = fetch_data_with_fallback(ticker, start_date_obj)
         
         if data and found_date:
+            print(f"   ✅ Data Found: {found_date}")
             res = analyze_flow(ticker, data, found_date)
             if res: results.append(res)
         else:
-            print(f"   -> No Data found for {ticker} (Last 7 days)")
+            print(f"   ❌ No Data (Checked 3 days back)")
             
     winners = sorted(results, key=lambda x: x['score'], reverse=True)
     
     if not winners:
-        send_telegram("⚠️ Tidak ada data bandar ditemukan dalam 7 hari terakhir. Cek Watchlist/API.")
+        print("⚠️ No valid data found for any stock. Check logs above for API Errors.")
         return
 
     # Reporting
-    msg = f"💀 *BANDARMOLOGY WATCHLIST*\n"
-    msg += f"_Analisa Smart Money Terkini_\n\n"
+    msg = f"💀 *BANDARMOLOGY REPORT* (Fix)\n"
+    msg += f"_Analisa Smart Money_\n\n"
     
     for s in winners:
         icon = "⚪"
@@ -204,7 +239,7 @@ def main():
         elif s['curr_price'] > s['avg_price'] * 1.05: posisi = "⚠️ Premium"
         
         msg += f"*{s['code']}* ({s['change']:+.1f}%) {icon}\n"
-        msg += f"📅 Data: {s['date']}\n" # Tampilkan tanggal data
+        msg += f"📅 {s['date']}\n" 
         msg += f"💰 Net: `{format_money(s['net_money'])}`\n"
         msg += f"🛒 Buy: *{b_name}* (Avg {s['avg_price']})\n"
         msg += f"📦 Sell: {s_name}\n"
