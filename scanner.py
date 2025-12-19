@@ -11,6 +11,9 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GOAPI_KEY = os.environ.get("GOAPI_KEY")
 WATCHLIST_FILE = "watchlist.txt"
 
+# BATAS AMAN: Gunakan 25 hit saja, sisa 5 buat cadangan
+DAILY_API_LIMIT = 25 
+
 # --- KAMUS BROKER ---
 BROKER_MAP = {
     'YP': 'Mirae (Ritel)', 'PD': 'IndoPremier (Ritel)', 'XC': 'Ajaib (Ritel)', 
@@ -25,84 +28,132 @@ RETAIL_CODES = ['YP', 'PD', 'XC', 'XL', 'KK', 'CC', 'NI', 'SQ']
 
 def get_my_watchlist():
     if not os.path.exists(WATCHLIST_FILE):
-        print("⚠️ Watchlist file not found, using default.")
-        return ["BBCA", "BBRI", "BMRI", "ADRO", "TLKM", "ASII", "GOTO", "ANTM"]
+        print("⚠️ Watchlist file not found.")
+        return []
     with open(WATCHLIST_FILE, 'r') as f:
+        # Return list ticker bersih
         return list(set([line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]))
 
-def get_initial_target_date():
-    utc_now = datetime.datetime.utcnow()
-    wib_now = utc_now + datetime.timedelta(hours=7)
-    
-    if wib_now.hour < 12:
-        start_date = wib_now - datetime.timedelta(days=1)
-    else:
-        start_date = wib_now
-    return start_date
+def get_last_market_date():
+    """
+    Trik Hemat Kuota:
+    Cek data BBCA di YFinance (Gratis) untuk tahu kapan terakhir market buka.
+    Jadi kita TIDAK PERLU buang kuota GoAPI untuk menebak tanggal libur/buka.
+    """
+    try:
+        # Ambil data 7 hari terakhir
+        df = yf.download("BBCA.JK", period="7d", progress=False)
+        if df.empty:
+            # Fallback manual jika YF error
+            return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        # Ambil tanggal terakhir dari index dataframe
+        last_date = df.index[-1]
+        
+        # Cek jam sekarang (WIB)
+        utc_now = datetime.datetime.utcnow()
+        wib_now = utc_now + datetime.timedelta(hours=7)
+        
+        # Jika run PAGI (sebelum jam 10 pagi), kita pasti mau data KEMARIN (Close sebelumnya)
+        # Jika last_date == hari ini, berarti data hari ini sudah masuk (run sore).
+        # Jika run pagi, data hari ini blm ada, jadi last_date pasti kemarin (atau jumat lalu).
+        
+        date_str = last_date.strftime("%Y-%m-%d")
+        print(f"📅 Market Date Detected (via YFinance): {date_str}")
+        return date_str
+    except Exception as e:
+        print(f"⚠️ YF Date Check Error: {e}")
+        # Default mundur 1 hari
+        return (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
-def fetch_data_with_fallback(ticker, start_date):
+def filter_top_stocks(tickers, limit):
     """
-    Mengambil data dengan Debugging Print yang lengkap
+    FILTER GRATIS:
+    Urutkan saham berdasarkan Value Transaksi (Rupiah) menggunakan YFinance.
+    Kita hanya akan pakai kuota GoAPI untuk saham yang RAMAI saja.
     """
-    current_check_date = start_date
-    # Kurangi retry jadi 3 hari saja dulu biar ga abis kuota/kena limit
-    max_retries = 3 
+    print(f"🔍 Pre-screening {len(tickers)} saham via YFinance (Unlimited)...")
     
+    yf_tickers = [f"{t}.JK" for t in tickers]
+    valid_stocks = []
+    
+    try:
+        # Download batch cepat
+        data = yf.download(yf_tickers, period="2d", group_by='ticker', progress=False)
+        
+        for t in tickers:
+            try:
+                df = data[f"{t}.JK"]
+                if df.empty: continue
+                
+                # Ambil data terakhir
+                close = float(df['Close'].iloc[-1])
+                prev = float(df['Close'].iloc[-2])
+                vol = float(df['Volume'].iloc[-1])
+                val = close * vol # Value Transaksi
+                change = ((close - prev) / prev) * 100
+                
+                valid_stocks.append({
+                    'code': t,
+                    'value': val,
+                    'price': int(close),
+                    'change': change
+                })
+            except:
+                continue
+                
+        # URUTKAN DARI TRANSAKSI TERBESAR
+        valid_stocks.sort(key=lambda x: x['value'], reverse=True)
+        
+        # POTONG SESUAI KUOTA API
+        top_picks = valid_stocks[:limit]
+        
+        print(f"✅ Terpilih {len(top_picks)} saham teramai untuk di-scan Bandarmology.")
+        return top_picks
+        
+    except Exception as e:
+        print(f"⚠️ YFinance Batch Error: {e}")
+        # Fallback darurat: Ambil list depan aja
+        return [{'code': t, 'price': 0, 'change': 0} for t in tickers[:limit]]
+
+def get_broker_summary(ticker, date_str):
+    """
+    PANGGILAN MAHAL (Hati-hati, ini mengurangi kuota!)
+    """
     url = f"https://api.goapi.io/stock/idx/{ticker}/broker_summary"
     headers = {"X-API-KEY": GOAPI_KEY, "Accept": "application/json"}
     
-    for i in range(max_retries):
-        while current_check_date.weekday() > 4:
-            current_check_date -= datetime.timedelta(days=1)
-            
-        date_str = current_check_date.strftime("%Y-%m-%d")
+    try:
+        # Jeda 1 detik biar sopan
+        time.sleep(1.0) 
         
-        try:
-            # DEBUG: Print URL yang ditembak (biar tau script jalan)
-            # print(f"   🔎 Checking {ticker} on {date_str}...") 
-            
-            # PENTING: Jeda diperlama jadi 1.5 detik per request
-            # GoAPI Free Tier sangat sensitif.
-            time.sleep(1.5) 
-            
-            res = requests.get(url, headers=headers, params={"date": date_str}, timeout=10)
-            
-            # DIAGNOSA ERROR
-            if res.status_code != 200:
-                print(f"   ❌ API Error {res.status_code} for {ticker}: {res.text}")
-                # Jika errornya 429 (Too Many Requests), berhenti maksa
-                if res.status_code == 429:
-                    print("   ⚠️ RATE LIMIT HIT! Istirahat 5 detik...")
-                    time.sleep(5)
-                # Lanjut ke tanggal berikutnya (loop continue)
-                current_check_date -= datetime.timedelta(days=1)
-                continue
-
-            data = res.json()
-            
-            if data.get('status') == 'success' and data.get('data'):
-                d = data['data']
-                if 'top_buyers' in d and d['top_buyers']:
-                    return d, date_str
-            else:
-                # API 200 OK tapi data kosong/message error dari API
-                # print(f"   ⚠️ Data Empty for {ticker}: {data}") # Uncomment kalo mau liat detail
-                pass
-                
-        except Exception as e:
-            print(f"   🔥 Exception Connection: {e}")
+        res = requests.get(url, headers=headers, params={"date": date_str}, timeout=10)
         
-        current_check_date -= datetime.timedelta(days=1)
+        if res.status_code == 429:
+            print("🛑 KUOTA HABIS / RATE LIMIT!")
+            return None
         
-    return None, None
+        if res.status_code != 200:
+            print(f"   ❌ API Error {ticker}: {res.status_code}")
+            return None
+            
+        data = res.json()
+        if data.get('status') == 'success' and data.get('data'):
+            return data['data']
+            
+    except Exception as e:
+        print(f"   ⚠️ Connection Exception: {e}")
+    
+    return None
 
-def analyze_flow(ticker, data, found_date):
-    if not data: return None
+def analyze_flow(stock_info, broker_data):
+    if not broker_data or 'top_buyers' not in broker_data: return None
 
-    buyers = data.get('top_buyers', [])
-    sellers = data.get('top_sellers', [])
+    buyers = broker_data.get('top_buyers', [])
+    sellers = broker_data.get('top_sellers', [])
     if not buyers or not sellers: return None
 
+    # Hitung Net Buy Top 3
     buy_val = sum([float(x['value']) for x in buyers[:3]])
     sell_val = sum([float(x['value']) for x in sellers[:3]])
     net_money = buy_val - sell_val
@@ -114,6 +165,7 @@ def analyze_flow(ticker, data, found_date):
     score = 0
     tags = []
     
+    # Scoring Logic
     if net_money > 1_000_000_000:
         score += 3
         tags.append("BIG ACCUM")
@@ -126,7 +178,7 @@ def analyze_flow(ticker, data, found_date):
     if top_buyer in RETAIL_CODES:
         score -= 2
         tags.append("RETAIL BUY")
-    elif top_buyer in ['BK', 'AK', 'ZP', 'MG', 'BB', 'KZ', 'RX', 'CC']:
+    elif top_buyer in ['BK', 'AK', 'ZP', 'MG', 'BB', 'CC']:
         score += 2
         tags.append("WHALE BUY")
         
@@ -134,41 +186,13 @@ def analyze_flow(ticker, data, found_date):
         score += 2
         tags.append("EATING RETAIL")
 
-    curr_price = avg_price
-    change = 0
-    try:
-        # PENTING: YFinance juga butuh jeda biar ga diblok
-        time.sleep(0.5) 
-        df = yf.download(f"{ticker}.JK", period="2d", progress=False)
-        if not df.empty:
-            # Handle MultiIndex column (YFinance update terbaru)
-            if isinstance(df.columns, pd.MultiIndex):
-                # Ambil kolom Close untuk ticker tersebut
-                # Struktur biasanya ('Close', 'BBCA.JK')
-                close_col = df['Close']
-                if isinstance(close_col, pd.DataFrame):
-                    curr_price = int(close_col.iloc[-1].iloc[0])
-                    prev = close_col.iloc[-2].iloc[0]
-                else:
-                    curr_price = int(close_col.iloc[-1])
-                    prev = close_col.iloc[-2]
-            else:
-                curr_price = int(df['Close'].iloc[-1])
-                prev = df['Close'].iloc[-2]
-                
-            change = ((curr_price - prev) / prev) * 100
-    except Exception as e: 
-        # print(f"YF Error: {e}") 
-        pass
-
     return {
-        "code": ticker,
-        "date": found_date, 
+        "code": stock_info['code'],
         "score": score,
         "net_money": net_money,
         "avg_price": avg_price,
-        "curr_price": curr_price,
-        "change": change,
+        "curr_price": stock_info['price'],
+        "change": stock_info['change'],
         "top_buyer": top_buyer,
         "top_seller": top_seller,
         "tags": tags
@@ -187,43 +211,45 @@ def send_telegram(message):
 
 def main():
     if not GOAPI_KEY: 
-        print("❌ CRITICAL: GOAPI_KEY is missing from env!")
+        print("❌ API Key Missing")
         return
-    else:
-        # Print 4 huruf awal key untuk memastikan key terbaca benar
-        print(f"🔑 API Key Detected: {GOAPI_KEY[:4]}****")
 
+    # 1. SETUP & CEK TANGGAL (Gratis)
     my_stocks = get_my_watchlist()
-    start_date_obj = get_initial_target_date()
+    target_date = get_last_market_date() # Ini pakai YFinance (Gratis)
     
-    print(f"💀 BANDAR WATCHLIST DEBUG MODE")
-    print(f"📅 Start Checking from: {start_date_obj.strftime('%Y-%m-%d')}")
-    print(f"📋 Total Stocks: {len(my_stocks)}")
+    print(f"💀 SNIPER MODE: Target Date {target_date}")
+    
+    # 2. FILTERING (Gratis)
+    # Hanya ambil Top 25 saham teramai dari watchlist Anda
+    target_stocks = filter_top_stocks(my_stocks, limit=DAILY_API_LIMIT)
     
     results = []
     
-    for i, ticker in enumerate(my_stocks):
-        # Progress Log
-        print(f"[{i+1}/{len(my_stocks)}] Scanning {ticker}...")
+    # 3. EKSEKUSI (Berbayar - Hemat Hits)
+    print(f"🚀 Scanning {len(target_stocks)} saham prioritas...")
+    for i, stock in enumerate(target_stocks):
+        print(f"   [{i+1}/{len(target_stocks)}] Cek Bandar {stock['code']}...")
         
-        data, found_date = fetch_data_with_fallback(ticker, start_date_obj)
+        b_data = get_broker_summary(stock['code'], target_date)
         
-        if data and found_date:
-            print(f"   ✅ Data Found: {found_date}")
-            res = analyze_flow(ticker, data, found_date)
+        if b_data:
+            res = analyze_flow(stock, b_data)
             if res: results.append(res)
         else:
-            print(f"   ❌ No Data (Checked 3 days back)")
+            print(f"     -> No Data / Error")
             
+    # Urutkan pemenang
     winners = sorted(results, key=lambda x: x['score'], reverse=True)
     
     if not winners:
-        print("⚠️ No valid data found for any stock. Check logs above for API Errors.")
+        send_telegram(f"⚠️ Report {target_date}: Tidak ada data/Market Sepi.")
         return
 
-    # Reporting
-    msg = f"💀 *BANDARMOLOGY REPORT* (Fix)\n"
-    msg += f"_Analisa Smart Money_\n\n"
+    # 4. REPORTING
+    msg = f"💀 *BANDAR SNIPER REPORT*\n"
+    msg += f"📅 Data: {target_date}\n"
+    msg += f"🔍 Scanned: {len(target_stocks)} Most Active Stocks\n\n"
     
     for s in winners:
         icon = "⚪"
@@ -239,7 +265,6 @@ def main():
         elif s['curr_price'] > s['avg_price'] * 1.05: posisi = "⚠️ Premium"
         
         msg += f"*{s['code']}* ({s['change']:+.1f}%) {icon}\n"
-        msg += f"📅 {s['date']}\n" 
         msg += f"💰 Net: `{format_money(s['net_money'])}`\n"
         msg += f"🛒 Buy: *{b_name}* (Avg {s['avg_price']})\n"
         msg += f"📦 Sell: {s_name}\n"
