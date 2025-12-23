@@ -1,35 +1,39 @@
-name: Scan
+name: Scalper Bot Routine
 
 on:
   schedule:
-    # Jalan setiap jam dari jam 09:00 - 16:00 WIB (UTC+7)
-    # Di GitHub Actions menggunakan UTC, jadi WIB - 7 jam.
-    # Jam 02:00 UTC = 09:00 WIB. Jam 09:00 UTC = 16:00 WIB.
-    - cron: '15 9 * * 1-5'  # Jam 09:15 UTC = 16:15 WIB
+    # Jalan setiap jam dari 09:00 WIB s/d 16:00 WIB (Senin-Jumat)
+    # UTC: 02:00 - 09:00
+    - cron: '0 2-9 * * 1-5'
+    
+    # OPSI TAMBAHAN (Jika ingin pas Closing 16:15 WIB)
+    - cron: '15 9 * * 1-5'
+
   workflow_dispatch: # Supaya bisa di-run manual tombol klik
 
 jobs:
-  scan:
+  run-scanner:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
 
-      - name: Install Dependencies
-        run: |
-          pip install requests
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests yfinance pandas
 
-      - name: Run Scanner Script
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Nama variabel environment dibuat generik
-          CORE_API_KEY: ${{ secrets.APP_SECRET_KEY }}
-          CORE_API_URL: ${{ secrets.APP_ENDPOINT }}
-          CORE_API_HOST: ${{ secrets.APP_HOST }}
-        run: python scanner.py
+    - name: Run Scalper Scanner
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        CORE_API_KEY: ${{ secrets.APP_SECRET_KEY }}
+        CORE_API_URL: ${{ secrets.APP_ENDPOINT }}
+        CORE_API_HOST: ${{ secrets.APP_HOST }}
+      run: python scanner.py
