@@ -2,12 +2,14 @@ name: Scalper Bot Routine
 
 on:
   schedule:
-    # Jalan setiap jam dari 09:00 WIB s/d 16:00 WIB (Senin-Jumat)
-    # UTC: 02:00 - 09:00
-    - cron: '0 2-9 * * 1-5'
+    # 08:45 WIB (01:45 UTC) - Pre-market / Start
+    - cron: '45 1 * * 1-5'
     
-    # OPSI TAMBAHAN (Jika ingin pas Closing 16:15 WIB)
-    - cron: '15 9 * * 1-5'
+    # 09:00 WIB to 15:45 WIB (02:00 - 08:45 UTC) - Every 15 mins
+    - cron: '*/15 2-8 * * 1-5'
+    
+    # 16:00 WIB (09:00 UTC) - Market Close
+    - cron: '0 9 * * 1-5'
 
   workflow_dispatch: # Supaya bisa di-run manual tombol klik
 
