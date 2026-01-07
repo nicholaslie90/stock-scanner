@@ -1,0 +1,64 @@
+/* ==========================================================================
+   1. HIDE DISTRACTIONS (Header, Sidebar, Floating Buttons)
+   ========================================================================== */
+#stockbit-header-web, 
+header, 
+nav,
+#buttonSupport,
+#crisp-chatbox,
+.ant-btn-float,
+button[class*="eCkYNu"],
+/* Hide the sidebar (sibling of the main content) */
+div[class*="ckerHE"] > div:not([class*="dAtAHE"]) {
+    display: none !important;
+}
+
+/* Remove top margin/padding caused by the hidden header */
+.cwcvHY, 
+#main-container {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
+
+/* ==========================================================================
+   2. UNLOCK FULL WIDTH
+   ========================================================================== */
+/* Force main containers to use 100% of the screen */
+#main-container, 
+div[class*="sc-fad2ded0"], 
+.cwcvHY,
+div[class*="dAtAHE"],
+div[class*="dYMqZv"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    flex: 0 0 100% !important;
+}
+
+/* ==========================================================================
+   3. FORCE 8-COLUMN GRID (Targeting child of dYMqZv)
+   ========================================================================== */
+
+/* User Instruction: Target the div BELOW "sc-f12bd4f3-3 dYMqZv"
+   This selects the direct child ( > div ) of that specific class.
+*/
+div[class*="dYMqZv"] > div {
+    display: grid !important;
+    
+    /* 8 Columns, Fixed Width */
+    grid-template-columns: repeat(8, 355px) !important;
+    
+    /* Aesthetics */
+    gap: 5px !important;
+    width: auto !important;
+    
+    /* Ensure the grid doesn't try to wrap or stack */
+    grid-auto-flow: row !important;
+}
+
+/* Enable horizontal scrolling on the parent wrapper so you can reach column 8 */
+div[class*="dYMqZv"] {
+    overflow-x: auto !important;
+    display: block !important;
+}
