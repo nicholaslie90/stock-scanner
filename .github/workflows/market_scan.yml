@@ -26,7 +26,7 @@ on:
 
   workflow_dispatch:
 
-# CRITICAL: This permission allows the bot to commit the "keepalive" ping
+# Permission required to push the "keepalive" commit
 permissions:
   contents: write
 
@@ -57,9 +57,24 @@ jobs:
         CORE_API_HOST: ${{ secrets.APP_HOST }}
       run: python scanner.py
 
-    # --- KEEPALIVE STEP ---
-    # Only pushes a commit if no activity for 50 days
-    - name: Keepalive Workflow
-      uses: gautamkrishnar/keepalive-workflow@v1
-      with:
-        commit_message: "Automated keepalive [skip ci]"
+    # --- FIXED KEEPALIVE (Native Script) ---
+    # This uses standard git commands instead of downloading a blocked action.
+    # It runs only if it's been >50 days since the last commit to prevent spam.
+    - name: Keepalive Script
+      run: |
+        # Check time since last commit
+        last_commit=$(git log -1 --format=%ct)
+        now=$(date +%s)
+        days_since=$(( ($now - $last_commit) / 86400 ))
+
+        echo "Days since last commit: $days_since"
+
+        if [ "$days_since" -gt 50 ]; then
+          echo "Inactive for over 50 days. Pushing keepalive commit."
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git commit --allow-empty -m "Automated keepalive [skip ci]"
+          git push
+        else
+          echo "Activity detected recently. No keepalive needed."
+        fi
