@@ -6,29 +6,29 @@ on:
     - cron: '45 1 * * 1-5'
 
     # 2. Morning Session - Common (09:00 - 11:30 WIB)
-    # Covers 09:00 to 11:30. Safe for all days.
     - cron: '*/15 2-3 * * 1-5'
     - cron: '0,15,30 4 * * 1-5'
 
     # 3. Morning Session - Mon-Thu Extension (11:45 - 12:00 WIB)
-    # Runs the extra 30 mins for Mon-Thu only.
     - cron: '45 4 * * 1-4'
     - cron: '0 5 * * 1-4'
 
-    # --- MARKET BREAK (No runs here) ---
+    # --- MARKET BREAK ---
 
     # 4. Afternoon Session - Mon-Thu Start (13:30 - 13:45 WIB)
-    # Starts early for Mon-Thu only.
     - cron: '30,45 6 * * 1-4'
 
     # 5. Afternoon Session - Common (14:00 - 15:45 WIB)
-    # Friday joins back in here at 14:00.
     - cron: '*/15 7-8 * * 1-5'
 
     # 6. Market Close (16:00 WIB)
     - cron: '0 9 * * 1-5'
 
-  workflow_dispatch: # Supaya bisa di-run manual tombol klik
+  workflow_dispatch:
+
+# CRITICAL: This permission allows the bot to commit the "keepalive" ping
+permissions:
+  contents: write
 
 jobs:
   run-scanner:
@@ -56,3 +56,10 @@ jobs:
         CORE_API_URL: ${{ secrets.APP_ENDPOINT }}
         CORE_API_HOST: ${{ secrets.APP_HOST }}
       run: python scanner.py
+
+    # --- KEEPALIVE STEP ---
+    # Only pushes a commit if no activity for 50 days
+    - name: Keepalive Workflow
+      uses: gautamkrishnar/keepalive-workflow@v1
+      with:
+        commit_message: "Automated keepalive [skip ci]"
