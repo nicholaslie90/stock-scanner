@@ -76,3 +76,33 @@ input {
     line-height: 1.5 !important;
     padding-top: 5px !important;
 }
+
+/* ==========================================================================
+   FIX: REMOVE PHANTOM MARGINS/PADDING
+   ========================================================================== */
+
+/* 1. Target the PARENT column that holds #main-container */
+/* This is usually where the hidden padding lives */
+#__next [data-cy="main-layout"] > div > div:has(#main-container) {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+    width: 100vw !important; /* Force it to viewport width */
+    flex: 0 0 100% !important;
+}
+
+/* 2. Reset #main-container itself */
+#main-container {
+    margin: 0 !important;
+    padding: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+}
+
+/* 3. Force the internal content wrapper to stretch */
+/* Sometimes the inner wrapper has a max-width limit (e.g. 1440px) */
+#main-container > div {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+}
