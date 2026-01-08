@@ -55,8 +55,8 @@
 #main-container > div > div > div:last-child > div {
     display: grid !important;
     /* 8 Columns, Fixed Width of 355px */
-    grid-template-columns: repeat(8, 355px) !important;
-    gap: 5px !important;
+    grid-template-columns: repeat(9, 355px) !important;
+    gap: 1px !important;
     width: auto !important;
     grid-auto-flow: row !important;
 }
