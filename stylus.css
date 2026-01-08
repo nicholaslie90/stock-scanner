@@ -1,67 +1,78 @@
 /* ==========================================================================
    STYLUS (CSS-SYNTAX MODE)
-   Resilient Structural Selectors
+   Resilient Structural Selectors - FIXED
    ========================================================================== */
 
-/* 1. HIDE DISTRACTIONS (Header, Sidebar, Floating Buttons) */
+/* 1. HIDE DISTRACTIONS */
+#buttonSupport, #crisp-chatbox, .ant-btn-float { display: none !important; }
+#__next [data-cy="main-layout"] > div > div:not(:has(#main-container)) { display: none !important; }
+#__next [data-cy="main-layout"] > div > div:has(#main-container) > div:first-child { display: none !important; }
 
-/* Global floating widgets */
-#buttonSupport,
-#crisp-chatbox,
-.ant-btn-float {
-    display: none !important;
-}
-
-/* LOGIC: Target the Main Layout Wrapper.
-   We identify the "Main Column" as the one that contains #main-container.
-   We hide everything else (Sidebars).
-*/
-#__next [data-cy="main-layout"] > div > div:not(:has(#main-container)) {
-    display: none !important;
-}
-
-/* LOGIC: Hide the Header.
-   The header is the *first element* inside the Main Column.
-*/
-#__next [data-cy="main-layout"] > div > div:has(#main-container) > div:first-child {
-    display: none !important;
-}
-
-/* Remove spacing from the main container now that header is gone */
+/* Reset Container */
 #main-container {
-    margin-top: 0 !important;
-    padding-top: 0 !important;
-    max-width: 100% !important;
-    width: 100% !important;
-    flex: 0 0 100% !important;
+    margin-top: 0 !important; padding-top: 0 !important;
+    max-width: 100% !important; width: 100% !important; flex: 0 0 100% !important;
 }
 
-/* ==========================================================================
-   2. FORCE 8-COLUMN GRID
-   ========================================================================== */
-
-/* LOGIC: Find the Grid Wrapper structurally.
-   Path: #main-container -> Content Wrapper -> Inner Wrapper -> Grid Container (Last Child)
-   This avoids the random "sc-xxxx" class names.
-*/
-
+/* 2. FORCE 8-COLUMN GRID */
 #main-container > div > div > div:last-child {
-    overflow-x: auto !important;
-    display: block !important;
-    width: 100% !important;
+    overflow-x: auto !important; display: block !important; width: 100% !important;
 }
-
-/* The Grid Itself (Immediate child of the wrapper above) */
 #main-container > div > div > div:last-child > div {
     display: grid !important;
-    /* 8 Columns, Fixed Width of 355px */
     grid-template-columns: repeat(9, 355px) !important;
     gap: 1px !important;
     width: auto !important;
     grid-auto-flow: row !important;
 }
+#main-container > div > div > div:last-child > div > div { min-width: 355px !important; }
 
-/* Ensure individual cards don't shrink */
-#main-container > div > div > div:last-child > div > div {
-    min-width: 355px !important;
+/* ==========================================================================
+   3. BIG TEXT (PRICE & NAME)
+   ========================================================================== */
+
+/* A. UNLOCK HEADER HEIGHT */
+/* We target the header wrapper to ensure it fits the big text */
+#main-container > div > div > div:last-child > div > div > div:first-child {
+    height: auto !important;
+    min-height: 60px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+
+/* B. STOCK PRICE (Restored exact structure) */
+/* Structure: Card -> Header -> Wrapper -> Right Side -> Inner -> P tag */
+#main-container > div > div > div:last-child > div > div /* Card */
+> div:first-child  /* div[1] */
+> div              /* The Wrapper I previously missed */
+> div:nth-child(2) /* div[2] (Right Side) */
+> div 
+> p:first-child {
+    font-size: 1.8em !important;
+    font-weight: bold !important;
+    line-height: 1 !important;
+}
+
+/* C. STOCK NAME (Targeting the Input/Selector) */
+/* Structure: Card -> Header -> Wrapper -> Left Side -> Select */
+#main-container > div > div > div:last-child > div > div /* Card */
+> div:first-child  /* div[1] */
+> div              /* Wrapper */
+> div:first-child  /* div[1] (Left Side) */
+input {
+    font-size: 1.8em !important;
+    font-weight: 800 !important;
+    height: auto !important;
+}
+
+/* Target the text span (Ant Design displays this when not typing) */
+#main-container > div > div > div:last-child > div > div 
+> div:first-child 
+> div 
+> div:first-child 
+.ant-select-selection-item {
+    font-size: 2em !important;
+    font-weight: 800 !important;
+    line-height: 1.5 !important;
+    padding-top: 5px !important;
 }
