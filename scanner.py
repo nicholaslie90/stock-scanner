@@ -3,6 +3,7 @@ import os
 import datetime
 import yfinance as yf
 import math
+import numpy as np
 
 # --- CONFIGURATION ---
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -10,17 +11,16 @@ TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID")
 SOURCE_FILE = "watchlist.txt"
 
 def load_targets():
-    """Load daftar saham dari watchlist.txt"""
+    """Load stock list from watchlist.txt"""
     if not os.path.exists(SOURCE_FILE): return []
     with open(SOURCE_FILE, 'r') as f:
-        # Bersihkan text dan pastikan format benar
+        # Clean text, upper case, remove .JK, remove duplicates
         return list(set([line.strip().upper().replace(".JK", "") for line in f.readlines() if line.strip()]))
 
 def push_notification(msg):
-    """Kirim pesan ke Telegram"""
+    """Send message to Telegram"""
     if not TG_TOKEN or not TG_CHAT: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    # Chunking pesan panjang
     for i in range(0, len(msg), 4000):
         try: 
             requests.post(url, json={"chat_id": TG_CHAT, "text": msg[i:i+4000], "parse_mode": "Markdown"})
@@ -28,7 +28,7 @@ def push_notification(msg):
             print(f"Telegram Error: {e}")
 
 def format_val(v):
-    """Format angka milyaran/jutaan"""
+    """Format Value to Billions (B) or Millions (M)"""
     if abs(v) >= 1_000_000_000: return f"{v/1_000_000_000:.1f}B"
     if abs(v) >= 1_000_000: return f"{v/1_000_000:.0f}M"
     return str(int(v))
@@ -36,13 +36,11 @@ def format_val(v):
 def analyze_market(tickers):
     print(f"⚡ Screening {len(tickers)} stocks via YFinance...")
     
-    # Tambahkan .JK untuk Yahoo Finance
     yf_tickers = [f"{t}.JK" for t in tickers]
     
     try:
-        # Download data hari ini (Intraday)
-        # Gunakan threads=True untuk mempercepat download
-        df = yf.download(yf_tickers, period="1d", group_by='ticker', progress=False, threads=True)
+        # UPDATED: Fetch '1mo' (1 Month) instead of '1d' to calculate Average Volume
+        df = yf.download(yf_tickers, period="1mo", group_by='ticker', progress=False, threads=True)
     except Exception as e:
         print(f"⚠️ YFinance Connection Error: {e}")
         return []
@@ -51,106 +49,130 @@ def analyze_market(tickers):
     
     for t in tickers:
         try:
-            # Handle struktur data YFinance (MultiIndex)
+            # Handle YFinance MultiIndex structure
             if len(tickers) == 1:
                 data = df
             else:
-                data = df[f"{t}.JK"]
+                # Use .xs or simple access depending on structure, robust fallback
+                if f"{t}.JK" in df.columns.levels[0]:
+                    data = df[f"{t}.JK"]
+                else:
+                    continue
             
-            if data.empty: continue
+            if data.empty or len(data) < 2: continue
             
-            # Ambil candle terakhir
-            # iloc[-1] mengambil data paling update (realtime/closing)
-            high = float(data['High'].iloc[-1])
-            low = float(data['Low'].iloc[-1])
-            close = float(data['Close'].iloc[-1])
-            open_price = float(data['Open'].iloc[-1])
-            vol = float(data['Volume'].iloc[-1])
+            # --- EXTRACT DATA ---
+            # Recent Candle (Today)
+            curr = data.iloc[-1]
+            high = float(curr['High'])
+            low = float(curr['Low'])
+            close = float(curr['Close'])
+            open_price = float(curr['Open'])
+            vol = float(curr['Volume'])
             
-            # Skip saham suspensi (Volume 0 atau Open 0)
+            # Skip Suspended/No Data
             if open_price == 0 or vol == 0 or high == low: continue
-            
-            # --- LOGIC SCALPER ---
-            
-            # 1. Swing (%) = Seberapa lebar range hari ini
-            # Rumus: (High - Low) / Low
+
+            # --- CALCULATE METRICS ---
+
+            # 1. SWING (%)
             swing_pct = ((high - low) / low) * 100
             
-            # 2. Value Transaksi (Estimasi)
+            # 2. TRANSACTION VALUE (Approximation of Liquidity)
+            # This is your main filter for "Frequency" capability. 
+            # Low value (< 1B IDR) usually means low frequency.
             value_tx = close * vol
             
-            # 3. Posisi Harga (0.0 = Low, 1.0 = High)
-            # Ini penting untuk tau apakah harga lagi di pucuk atau di dasar
+            # 3. RVOL (Relative Volume) - The "Frequency" Proxy
+            # We take the average volume of the last 20 days (excluding today)
+            # If history is short, take whatever is available
+            hist_vol = data['Volume'].iloc[:-1] 
+            avg_vol = hist_vol.mean() if len(hist_vol) > 0 else vol
+            
+            # RVOL Calculation
+            # If RVOL > 1.0, it is trading more than usual.
+            # If RVOL > 3.0, it is VERY active (High Frequency).
+            rvol = vol / avg_vol if avg_vol > 0 else 0
+
+            # 4. POSITION SCORE (0.0=Low, 1.0=High)
             range_price = high - low
             pos_score = (close - low) / range_price if range_price > 0 else 0.5
             
             # --- FILTERING ---
-            # Swing minimal 1.5% (biar ada gerak)
-            # Value minimal 1 Miliar (biar liquid)
-            if swing_pct >= 1.5 and value_tx >= 1_000_000_000:
-                
-                # Filter tambahan: Buang saham yang diam di tengah (0.4 - 0.6)
-                # KECUALI swingnya sangat besar (> 5%)
-                is_boring = 0.4 < pos_score < 0.6
-                if is_boring and swing_pct < 5.0:
-                    continue 
+            
+            # Filter A: Must have liquidity (Min 2 Billion IDR)
+            # Scalping on < 2B is risky due to lack of order book depth (papan tipis)
+            if value_tx < 2_000_000_000: continue
+            
+            # Filter B: Must have Volatility OR High RVOL
+            # If swing is small, RVOL must be HUGE (accumulation phase)
+            if swing_pct < 1.5 and rvol < 2.0: continue
 
-                candidates.append({
-                    'id': t,
-                    'swing': swing_pct,
-                    'price': close,
-                    'high': high,
-                    'low': low,
-                    'value_tx': value_tx,
-                    'change': ((close - open_price) / open_price) * 100,
-                    'pos_score': pos_score
-                })
+            candidates.append({
+                'id': t,
+                'swing': swing_pct,
+                'price': close,
+                'high': high,
+                'low': low,
+                'value_tx': value_tx,
+                'rvol': rvol,  # Added RVOL
+                'change': ((close - open_price) / open_price) * 100,
+                'pos_score': pos_score
+            })
         except Exception: 
             continue
             
-    # Sorting: Kombinasi Swing Lebar & Value Besar
-    # Kita pakai Logaritma Value supaya saham big cap tidak mendominasi
-    candidates.sort(key=lambda x: (x['swing'] * math.log(x['value_tx'])), reverse=True)
+    # --- SORTING STRATEGY (The "Top Frequency" Logic) ---
+    # We create a 'Scalp Score'
+    # Score = Swing * RVOL * Log(Value)
+    # This prioritizes stocks that are:
+    # 1. Moving wide (Swing)
+    # 2. Crowded/Busy (RVOL)
+    # 3. Liquid (Value)
     
-    return candidates[:15] # Ambil Top 15
+    candidates.sort(key=lambda x: (x['swing'] * x['rvol'] * math.log(x['value_tx'])), reverse=True)
+    
+    return candidates[:15]
 
 def main():
     targets = load_targets()
     if not targets:
-        print("❌ Watchlist kosong atau file tidak ditemukan.")
+        print("❌ Watchlist empty or file not found.")
         return
 
     results = analyze_market(targets)
     
     if not results:
-        print("⚠️ Tidak ada saham yang lolos filter volatilitas hari ini.")
+        print("⚠️ No stocks passed the scalper filter.")
         return
 
     # --- REPORTING ---
     wib_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime('%H:%M')
     
-    txt = f"⚡ *SCALPER VOLATILITY SCAN* ⚡\n"
+    txt = f"⚡ *SCALPER HIGH FREQUENCY SCAN* ⚡\n"
     txt += f"⏱️ Time: {wib_time} WIB\n"
-    txt += f"_Filter: Swing > 1.5% & Active_\n\n"
+    txt += f"_Sort: Volatility x RVOL_\n\n"
     
     for s in results:
-        # Icon Arah Harga
         icon = "⚪"
-        if s['change'] > 0: icon = "🟢" # Naik
-        elif s['change'] < 0: icon = "🔴" # Turun
+        if s['change'] > 0: icon = "🟢"
+        elif s['change'] < 0: icon = "🔴"
         
-        # Indikator Posisi Harga (Visual Bar)
-        # 🔥 = Near High (Breakout/Strong)
-        # 🔻 = Near Low (Rebound/Dip Buy)
+        # Pos Info
         pos_info = "Mid"
-        if s['pos_score'] >= 0.8: pos_info = "🔥 *Near High*"
-        elif s['pos_score'] <= 0.2: pos_info = "🔻 *Near Low*"
+        if s['pos_score'] >= 0.8: pos_info = "🔥 *Top*"
+        elif s['pos_score'] <= 0.2: pos_info = "🔻 *Bot*"
         
-        txt += f"*{s['id']}* {icon} (Chg: {s['change']:+.1f}%)\n"
+        # RVOL Info
+        # Show specific icon if volume is exploding
+        rvol_icon = "🔈"
+        if s['rvol'] > 1.5: rvol_icon = "🔊"
+        if s['rvol'] > 3.0: rvol_icon = "📢 BOOM"
+
+        txt += f"*{s['id']}* {icon} ({s['change']:+.1f}%)\n"
         txt += f"🌊 Swing: *{s['swing']:.1f}%* | Val: {format_val(s['value_tx'])}\n"
-        txt += f"📍 Pos: {pos_info}\n"
-        txt += f"📏 Range: {int(s['low'])} - {int(s['high'])}\n"
-        txt += f"🎯 Curr: {int(s['price'])}\n"
+        txt += f"📊 Vol: *{s['rvol']:.1f}x* Avg {rvol_icon}\n"
+        txt += f"📍 Pos: {pos_info} | {int(s['price'])}\n"
         txt += "----------------------------\n"
         
     push_notification(txt)
