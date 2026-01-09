@@ -29,11 +29,33 @@ def push_notification(msg):
 
 def format_val(v):
     """Format angka milyaran/jutaan with NaN safety"""
-    if math.isnan(v): return "0"  # <-- ADD THIS LINE
+    if math.isnan(v): return "0"
     
     if abs(v) >= 1_000_000_000: return f"{v/1_000_000_000:.1f}B"
     if abs(v) >= 1_000_000: return f"{v/1_000_000:.0f}M"
     return str(int(v))
+
+def calc_trading_plan(high, low, close):
+    """
+    Calculate simple scalping pivot points based on daily range.
+    Entry: Near the Low (Bottom 25% of range)
+    Target: Near the High (Top 15% of range)
+    Stop Loss: 2% below Low
+    """
+    daily_range = high - low
+    if daily_range == 0: return close, close, close
+    
+    # Strategy: Buy on Retracement (Buy on Weakness)
+    # Entry zone: Low + 20% of range
+    entry_price = low + (daily_range * 0.20)
+    
+    # Target: High - 10% of range (Don't aim for exact top)
+    target_price = high - (daily_range * 0.10)
+    
+    # Stop Loss: 2 ticks below low (approx 1-2%)
+    stop_loss = low * 0.98
+    
+    return int(entry_price), int(target_price), int(stop_loss)
 
 def analyze_market(tickers):
     print(f"⚡ Screening {len(tickers)} stocks via YFinance...")
@@ -41,7 +63,7 @@ def analyze_market(tickers):
     yf_tickers = [f"{t}.JK" for t in tickers]
     
     try:
-        # UPDATED: Fetch '1mo' (1 Month) instead of '1d' to calculate Average Volume
+        # Fetch '1mo' to calculate Average Volume accurately
         df = yf.download(yf_tickers, period="1mo", group_by='ticker', progress=False, threads=True)
     except Exception as e:
         print(f"⚠️ YFinance Connection Error: {e}")
@@ -55,7 +77,6 @@ def analyze_market(tickers):
             if len(tickers) == 1:
                 data = df
             else:
-                # Use .xs or simple access depending on structure, robust fallback
                 if f"{t}.JK" in df.columns.levels[0]:
                     data = df[f"{t}.JK"]
                 else:
@@ -64,7 +85,6 @@ def analyze_market(tickers):
             if data.empty or len(data) < 2: continue
             
             # --- EXTRACT DATA ---
-            # Recent Candle (Today)
             curr = data.iloc[-1]
             high = float(curr['High'])
             low = float(curr['Low'])
@@ -72,45 +92,26 @@ def analyze_market(tickers):
             open_price = float(curr['Open'])
             vol = float(curr['Volume'])
 
-            # --- FIX: Check for NaN early ---
-            if math.isnan(close) or math.isnan(vol): continue # Skip if data is bad
-            
-            # Skip Suspended/No Data
+            if math.isnan(close) or math.isnan(vol): continue
             if open_price == 0 or vol == 0 or high == low: continue
 
             # --- CALCULATE METRICS ---
-
-            # 1. SWING (%)
             swing_pct = ((high - low) / low) * 100
-            
-            # 2. TRANSACTION VALUE (Approximation of Liquidity)
-            # This is your main filter for "Frequency" capability. 
-            # Low value (< 1B IDR) usually means low frequency.
             value_tx = close * vol
             
-            # 3. RVOL (Relative Volume) - The "Frequency" Proxy
-            # We take the average volume of the last 20 days (excluding today)
-            # If history is short, take whatever is available
             hist_vol = data['Volume'].iloc[:-1] 
             avg_vol = hist_vol.mean() if len(hist_vol) > 0 else vol
-            
-            # RVOL Calculation
-            # If RVOL > 1.0, it is trading more than usual.
-            # If RVOL > 3.0, it is VERY active (High Frequency).
             rvol = vol / avg_vol if avg_vol > 0 else 0
 
-            # 4. POSITION SCORE (0.0=Low, 1.0=High)
+            # Position Score (0.0 = At Low, 1.0 = At High)
             range_price = high - low
             pos_score = (close - low) / range_price if range_price > 0 else 0.5
             
+            # --- CALCULATE PLAN ---
+            entry, target, sl = calc_trading_plan(high, low, close)
+
             # --- FILTERING ---
-            
-            # Filter A: Must have liquidity (Min 2 Billion IDR)
-            # Scalping on < 2B is risky due to lack of order book depth (papan tipis)
             if value_tx < 2_000_000_000: continue
-            
-            # Filter B: Must have Volatility OR High RVOL
-            # If swing is small, RVOL must be HUGE (accumulation phase)
             if swing_pct < 1.5 and rvol < 2.0: continue
 
             candidates.append({
@@ -120,21 +121,17 @@ def analyze_market(tickers):
                 'high': high,
                 'low': low,
                 'value_tx': value_tx,
-                'rvol': rvol,  # Added RVOL
+                'rvol': rvol,
                 'change': ((close - open_price) / open_price) * 100,
-                'pos_score': pos_score
+                'pos_score': pos_score,
+                'plan_entry': entry,
+                'plan_target': target,
+                'plan_sl': sl
             })
         except Exception: 
             continue
             
-    # --- SORTING STRATEGY (The "Top Frequency" Logic) ---
-    # We create a 'Scalp Score'
-    # Score = Swing * RVOL * Log(Value)
-    # This prioritizes stocks that are:
-    # 1. Moving wide (Swing)
-    # 2. Crowded/Busy (RVOL)
-    # 3. Liquid (Value)
-    
+    # Sort: Scalp Score
     candidates.sort(key=lambda x: (x['swing'] * x['rvol'] * math.log(x['value_tx'])), reverse=True)
     
     return candidates[:15]
@@ -154,30 +151,43 @@ def main():
     # --- REPORTING ---
     wib_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=7)).strftime('%H:%M')
     
-    txt = f"⚡ *SCALPER HIGH FREQUENCY SCAN* ⚡\n"
+    txt = f"⚡ *SCALPER + PLAN SCAN* ⚡\n"
     txt += f"⏱️ Time: {wib_time} WIB\n"
-    txt += f"_Sort: Volatility x RVOL_\n\n"
+    txt += f"_Focus: Volatility & Low Position_\n\n"
     
     for s in results:
         icon = "⚪"
         if s['change'] > 0: icon = "🟢"
         elif s['change'] < 0: icon = "🔴"
         
-        # Pos Info
+        # --- POS INFO & HIGHLIGHT LOGIC ---
+        is_dip = False
         pos_info = "Mid"
-        if s['pos_score'] >= 0.8: pos_info = "🔥 *Top*"
-        elif s['pos_score'] <= 0.2: pos_info = "🔻 *Bot*"
         
-        # RVOL Info
-        # Show specific icon if volume is exploding
+        # Highlight if position is at bottom 20% (Buy the Dip candidate)
+        if s['pos_score'] <= 0.2: 
+            pos_info = "💎 *LOW/DIP*"
+            is_dip = True
+        elif s['pos_score'] >= 0.8: 
+            pos_info = "🔥 *Top*"
+        
         rvol_icon = "🔈"
         if s['rvol'] > 1.5: rvol_icon = "🔊"
         if s['rvol'] > 3.0: rvol_icon = "📢 BOOM"
 
-        txt += f"*{s['id']}* {icon} ({s['change']:+.1f}%)\n"
+        # --- BUILDING MESSAGE ---
+        # Add Special Header if it's a Dip Candidate
+        if is_dip:
+            txt += f"🚨 *POTENTIAL DIP BUY: {s['id']}* 🚨\n"
+        else:
+            txt += f"*{s['id']}* {icon} ({s['change']:+.1f}%)\n"
+            
         txt += f"🌊 Swing: *{s['swing']:.1f}%* | Val: {format_val(s['value_tx'])}\n"
         txt += f"📊 Vol: *{s['rvol']:.1f}x* Avg {rvol_icon}\n"
-        txt += f"📍 Pos: {pos_info} | {int(s['price'])}\n"
+        txt += f"📍 Pos: {pos_info} | Cur: {int(s['price'])}\n"
+        
+        # Add Plan Section
+        txt += f"🎯 *Plan:* Buy <{s['plan_entry']} | TP {s['plan_target']} | SL {s['plan_sl']}\n"
         txt += "----------------------------\n"
         
     push_notification(txt)
