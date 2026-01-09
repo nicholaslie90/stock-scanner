@@ -28,7 +28,9 @@ def push_notification(msg):
             print(f"Telegram Error: {e}")
 
 def format_val(v):
-    """Format Value to Billions (B) or Millions (M)"""
+    """Format angka milyaran/jutaan with NaN safety"""
+    if math.isnan(v): return "0"  # <-- ADD THIS LINE
+    
     if abs(v) >= 1_000_000_000: return f"{v/1_000_000_000:.1f}B"
     if abs(v) >= 1_000_000: return f"{v/1_000_000:.0f}M"
     return str(int(v))
@@ -69,6 +71,9 @@ def analyze_market(tickers):
             close = float(curr['Close'])
             open_price = float(curr['Open'])
             vol = float(curr['Volume'])
+
+            # --- FIX: Check for NaN early ---
+            if math.isnan(close) or math.isnan(vol): continue # Skip if data is bad
             
             # Skip Suspended/No Data
             if open_price == 0 or vol == 0 or high == low: continue
